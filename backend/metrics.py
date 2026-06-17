@@ -1,52 +1,73 @@
+import re
 import numpy as np
 from typing import Optional
-from sklearn.metrics.pairwise import cosine_similarity
+
+# Common English stopwords — excluded so overlap reflects meaningful terms
+_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "and", "or", "but", "if", "then", "of", "to", "in", "on", "at", "by",
+    "for", "with", "as", "from", "how", "what", "why", "when", "where",
+    "which", "who", "does", "do", "did", "this", "that", "these", "those",
+    "it", "its", "can", "will", "would", "should", "could", "may", "might",
+}
+
+
+def _tokens(text: str) -> set:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return {w for w in words if w not in _STOPWORDS and len(w) > 1}
 
 
 def compute_token_overlap(text1: str, text2: str) -> float:
-    words1 = set(text1.lower().split())
-    words2 = set(text2.lower().split())
-    if not words1 or not words2:
+    """Jaccard similarity (symmetric) — used for general matching."""
+    w1, w2 = _tokens(text1), _tokens(text2)
+    if not w1 or not w2:
         return 0.0
-    intersection = words1 & words2
-    union = words1 | words2
-    return len(intersection) / len(union)
+    return len(w1 & w2) / len(w1 | w2)
+
+
+def _coverage(needle: str, haystack: str) -> float:
+    """Directional: fraction of `needle` terms found in `haystack`.
+    Better than Jaccard when the two texts differ a lot in length."""
+    n, h = _tokens(needle), _tokens(haystack)
+    if not n:
+        return 0.0
+    return len(n & h) / len(n)
 
 
 def compute_faithfulness(answer: str, contexts: list[str]) -> float:
+    """How much of the answer is supported by the best-matching context."""
     if not answer or not contexts:
         return 0.0
-    scores = [compute_token_overlap(answer, ctx) for ctx in contexts]
-    return float(np.max(scores))
+    return float(np.max([_coverage(answer, ctx) for ctx in contexts]))
 
 
 def compute_answer_relevancy(question: str, answer: str) -> float:
+    """How well the answer covers the question's key terms (+ length signal)."""
     if not question or not answer:
         return 0.0
-    q_words = set(question.lower().split())
-    a_words = set(answer.lower().split())
-    if not q_words:
-        return 0.0
-    overlap = len(q_words & a_words) / len(q_words)
+    coverage = _coverage(question, answer)
     length_bonus = min(1.0, len(answer.split()) / 30)
-    return float(min(1.0, overlap * 0.6 + length_bonus * 0.4))
+    return float(min(1.0, coverage * 0.7 + length_bonus * 0.3))
 
 
 def compute_context_precision(question: str, contexts: list[str]) -> float:
+    """Are the retrieved contexts relevant to the question?
+    Best context's coverage of the question, blended with the mean."""
     if not contexts or not question:
         return 0.0
-    scores = [compute_token_overlap(question, ctx) for ctx in contexts]
-    return float(np.mean(scores))
+    scores = [_coverage(question, ctx) for ctx in contexts]
+    return float(0.6 * np.max(scores) + 0.4 * np.mean(scores))
 
 
 def compute_context_recall(answer: str, ground_truth: Optional[str], contexts: list[str]) -> float:
-    if not ground_truth or not contexts:
-        if answer and contexts:
-            scores = [compute_token_overlap(answer, ctx) for ctx in contexts]
-            return float(np.mean(scores))
+    """Does the context cover the information in the ground truth (or answer)?"""
+    if not contexts:
+        return 0.0
+    reference = ground_truth or answer
+    if not reference:
         return 0.5
-    scores = [compute_token_overlap(ground_truth, ctx) for ctx in contexts]
-    return float(np.mean(scores))
+    joined = " ".join(contexts)
+    return float(_coverage(reference, joined))
 
 
 def compute_hallucination_rate(faithfulness: float, llm_judge_score: Optional[float] = None) -> float:
